@@ -1,0 +1,81 @@
+name: 每日签到（单账号）
+
+on:
+  schedule:
+    - cron: '0 22 * * *'   # 每天北京时间 6:00
+  workflow_dispatch:
+
+jobs:
+  daily-sign:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0
+
+      - name: 下载 BiliToolPro 最新版
+        run: |
+          ASSETS_URL=$(curl -s https://api.github.com/repos/RayWangQvQ/BiliBiliToolPro/releases/latest | jq -r '.assets[] | select(.name | contains("linux-x64.zip")) | .browser_download_url')
+          wget -q "$ASSETS_URL" -O BiliToolPro.zip
+          unzip -q BiliToolPro.zip -d BiliTool
+
+      - name: 执行每日任务
+        run: |
+          set -e
+          cd BiliTool
+          EXECUTABLE=$(find . -type f -name "Ray.BiliBiliTool.Console" -o -name "Ray.BiliBiliTool.Console.dll" | head -n 1)
+          chmod +x "$EXECUTABLE"
+
+          COOKIE="${{ secrets.BILI_COOKIE }}"
+          if [ -z "$COOKIE" ]; then
+            echo "❌ 错误：未找到 BILI_COOKIE Secret，请先运行扫码登录工作流。"
+            exit 1
+          fi
+
+          echo "已获取 Cookie，长度：${#COOKIE} 字符"
+          echo "预览前50字符：${COOKIE:0:50}"
+
+          # 测试 Cookie 有效性
+          echo "测试 Cookie 有效性..."
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -b "$COOKIE" "https://api.bilibili.com/x/web-interface/nav")
+          if [ "$HTTP_CODE" -ne 200 ]; then
+            echo "❌ Cookie 无效，HTTP状态码: $HTTP_CODE"
+            exit 1
+          fi
+          RESP=$(curl -s -b "$COOKIE" "https://api.bilibili.com/x/web-interface/nav")
+          if echo "$RESP" | jq -e '.code == 0' > /dev/null; then
+            USER_NAME=$(echo "$RESP" | jq -r '.data.uname')
+            echo "✅ Cookie 有效，用户：$USER_NAME"
+          else
+            MSG=$(echo "$RESP" | jq -r .message)
+            echo "❌ Cookie 无效，返回消息: $MSG"
+            exit 1
+          fi
+
+          # ========== Telegram 推送配置 ==========
+          if [ -n "${{ secrets.TG_BOT_TOKEN }}" ] && [ -n "${{ secrets.TG_CHAT_ID }}" ]; then
+            export Ray_Serilog__WriteTo__3__Args__botToken="${{ secrets.TG_BOT_TOKEN }}"
+            export Ray_Serilog__WriteTo__3__Args__chatId="${{ secrets.TG_CHAT_ID }}"
+            echo "✅ Telegram 推送已配置"
+          else
+            echo "⚠️ 未配置 TG_BOT_TOKEN 或 TG_CHAT_ID，将不会收到推送消息"
+          fi
+          # ======================================
+
+          echo "======================================================"
+          echo "📱 开始执行每日任务"
+          echo "======================================================"
+
+          export Ray_BiliBiliCookies__0="$COOKIE"
+
+          if [[ "$EXECUTABLE" == *.dll ]]; then
+            dotnet "$EXECUTABLE" --runTasks=Daily
+          else
+            "$EXECUTABLE" --runTasks=Daily
+          fi
+
+          echo "🎉 每日任务执行完毕！"
